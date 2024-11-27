@@ -2,15 +2,21 @@ from typing import List, Union, Generator, Iterator, Optional
 from pprint import pprint
 import requests
 import json
+from pydantic import BaseModel, Field
 
 
 class Pipeline:
+    class Valves(BaseModel):
+        api_endpoint: str = Field(
+            default="http://flowise:3030", description="Flowise API endpoint"
+        )
+        chatflow_id: str = Field(default="", description="Flowise chatflow ID")
+        api_key: Optional[str] = Field(default=None, description="Flowise API key")
+        debug: bool = Field(default=True, description="Enable debug logging")
+
     def __init__(self):
         self.name = "Flowise Pipeline"
-        self.api_endpoint = "http://flowise:3030"  # Set your Flowise endpoint
-        self.chatflow_id = ""  # Set your chatflow ID
-        self.api_key = None  # Optional: Set your API key
-        self.debug = True
+        self.valves = self.Valves()
 
     async def on_startup(self):
         print(f"on_startup: {__name__}")
@@ -22,7 +28,7 @@ class Pipeline:
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"inlet: {__name__}")
-        if self.debug:
+        if self.valves.debug:
             print(f"inlet: {__name__} - body:")
             pprint(body)
             print(f"inlet: {__name__} - user:")
@@ -31,7 +37,7 @@ class Pipeline:
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"outlet: {__name__}")
-        if self.debug:
+        if self.valves.debug:
             print(f"outlet: {__name__} - body:")
             pprint(body)
             print(f"outlet: {__name__} - user:")
@@ -43,14 +49,14 @@ class Pipeline:
     ) -> Union[str, Generator, Iterator]:
         print(f"pipe: {__name__}")
 
-        if self.debug:
+        if self.valves.debug:
             print(f"pipe: {__name__} - received message from user: {user_message}")
 
-        url = f"{self.api_endpoint}/api/v1/prediction/{self.chatflow_id}"
+        url = f"{self.valves.api_endpoint}/api/v1/prediction/{self.valves.chatflow_id}"
         headers = {"Content-Type": "application/json"}
 
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.valves.api_key:
+            headers["Authorization"] = f"Bearer {self.valves.api_key}"
 
         data = {"question": user_message}
 
