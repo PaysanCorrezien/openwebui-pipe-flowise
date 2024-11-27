@@ -1,8 +1,8 @@
-from typing import List, Union, Generator, Iterator, Optional
+from typing import List, Union, Generator, Iterator, Optional, Dict
 from pprint import pprint
 import requests
 import json
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 
 class Pipeline:
@@ -12,45 +12,56 @@ class Pipeline:
         )
         chatflow_id: str = Field(default="", description="Flowise chatflow ID")
         api_key: Optional[str] = Field(default=None, description="Flowise API key")
-        debug: bool = Field(default=True, description="Enable debug logging")
+        override_config: Optional[str] = Field(
+            default=None,
+            description='Optional JSON configuration to override Flowise settings. Example: { "analytics": { "langFuse": { "userId": "user1" } }, "temperature": 0.7, "maxTokens": 500 }',
+        )
+        debug: bool = Field(default=False, description="Enable debug logging")
+
+        @validator("override_config")
+        def validate_json(cls, v):
+            if v is None:
+                return v
+            try:
+                config = json.loads(v)
+                if not isinstance(config, dict):
+                    raise ValueError("Override config must be a JSON object")
+                return v
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON format: {str(e)}")
 
     def __init__(self):
         self.name = "Flowise Pipeline"
         self.valves = self.Valves()
 
+    def debug_log(self, message: str, data: any = None):
+        """Helper method for consistent debug logging"""
+        if self.valves.debug:
+            print(f"[DEBUG] {message}")
+            if data is not None:
+                if isinstance(data, str):
+                    print(f"[DEBUG] {data}")
+                else:
+                    print(f"[DEBUG] {json.dumps(data, indent=2)}")
+
     async def on_startup(self):
         print(f"on_startup: {__name__}")
-        pass
 
     async def on_shutdown(self):
         print(f"on_shutdown: {__name__}")
-        pass
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        print(f"inlet: {__name__}")
-        if self.valves.debug:
-            print(f"inlet: {__name__} - body:")
-            pprint(body)
-            print(f"inlet: {__name__} - user:")
-            pprint(user)
+        self.debug_log("Inlet called", body)
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        print(f"outlet: {__name__}")
-        if self.valves.debug:
-            print(f"outlet: {__name__} - body:")
-            pprint(body)
-            print(f"outlet: {__name__} - user:")
-            pprint(user)
+        self.debug_log("Outlet called", body)
         return body
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
-        print(f"pipe: {__name__}")
-
-        if self.valves.debug:
-            print(f"pipe: {__name__} - received message from user: {user_message}")
+        self.debug_log("Pipe started", f"Message: {user_message}")
 
         url = f"{self.valves.api_endpoint}/api/v1/prediction/{self.valves.chatflow_id}"
         headers = {"Content-Type": "application/json"}
@@ -58,17 +69,56 @@ class Pipeline:
         if self.valves.api_key:
             headers["Authorization"] = f"Bearer {self.valves.api_key}"
 
-        data = {"question": user_message}
+        payload = {"question": user_message, "streaming": True}
 
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
+        # Add override config if provided
+        if self.valves.override_config:
             try:
-                json_response = response.json()
-                # Try different possible response fields
-                result = json_response.get("text", json_response.get("answer", ""))
-                yield result
+                override_config = json.loads(self.valves.override_config)
+                payload["overrideConfig"] = override_config
+                self.debug_log("Using override config", override_config)
             except json.JSONDecodeError as e:
-                print(f"Failed to parse JSON response. Error: {str(e)}")
-                yield "Error in JSON parsing."
-        else:
-            yield f"Flowise request failed with status code: {response.status_code}"
+                self.debug_log("Error parsing override config", str(e))
+
+        # Add message history if available
+        if messages and len(messages) > 1:
+            history = []
+            for msg in messages[:-1]:  # Exclude the current message
+                role = "userMessage" if msg["role"] == "user" else "apiMessage"
+                history.append({"role": role, "content": msg["content"]})
+            payload["history"] = history
+            self.debug_log("Added message history", history)
+
+        try:
+            self.debug_log("Starting Flowise request", payload)
+            response = requests.post(url, json=payload, headers=headers, stream=True)
+            response.raise_for_status()
+
+            if body.get("stream", True):
+                self.debug_log("Processing streaming response")
+                for line in response.iter_lines():
+                    if line:
+                        line_str = line.decode("utf-8")
+                        if line_str.startswith("data:"):
+                            event_str = line_str.replace("data:", "").strip()
+                            if event_str == "[DONE]":
+                                self.debug_log("Stream completed")
+                                continue
+
+                            try:
+                                event = json.loads(event_str)
+                                if event.get("event") == "token":
+                                    token = event.get("data", "")
+                                    self.debug_log("Token", token)
+                                    yield token
+                            except json.JSONDecodeError as e:
+                                self.debug_log("JSON decode error", str(e))
+                                continue
+            else:
+                self.debug_log("Non-streaming mode")
+                data = response.json()
+                return data.get("text", data.get("answer", ""))
+        except Exception as e:
+            error_msg = f"Error in pipe: {str(e)}"
+            self.debug_log("Error occurred", error_msg)
+            return f"Error: {str(e)}"
